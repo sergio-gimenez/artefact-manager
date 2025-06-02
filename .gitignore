@@ -1,6 +1,5 @@
 .venv
 docs/skopeo-docs
-*.sh
+copy-artefact_private.sh
 *.pyc
 .vscode
-/tmp
