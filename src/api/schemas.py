@@ -88,3 +88,8 @@ class PostCopyArtefact(BaseModel):
 
 class PostCopyArtefactResponse(BaseModel):
     success: bool
+
+
+class PostUploadHelmChartResponse(BaseModel):
+    success: bool
+    detail: str

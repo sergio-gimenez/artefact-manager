@@ -1,4 +1,7 @@
-from fastapi import FastAPI, HTTPException
+import os
+import subprocess
+import tempfile
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import RedirectResponse
 
 from src.skopeo.skopeo import SkopeoClient
@@ -76,6 +79,74 @@ def copy_artefact(
         return schemas.PostCopyArtefactResponse(success=success)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/upload-helm-chart", tags=["Artefact Management"])
+async def upload_helm_chart(
+    chart_file: UploadFile = File(
+        ..., description="The packaged Helm chart (.tgz file)."
+    ),
+    registry_url: str = Form(..., description="URL of the OCI registry."),
+    registry_username: str | None = Form(
+        None, description="Username for the OCI registry."
+    ),
+    registry_password: str | None = Form(
+        None, description="Password for the OCI registry."
+    ),
+) -> schemas.PostUploadHelmChartResponse:
+    """
+    API endpoint to upload a packaged Helm Chart to an OCI-compliant repository using Helm CLI.
+    """
+    if not chart_file.filename or not chart_file.filename.endswith(".tgz"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid file type. Please upload a packaged Helm chart (.tgz).",
+        )
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".tgz") as temp_chart:
+            content = await chart_file.read()
+            temp_chart.write(content)
+            temp_chart.flush()
+
+            # 1. Login to the registry if credentials are provided
+            if registry_username and registry_password:
+                login_cmd = [
+                    "helm", "registry", "login",
+                    registry_url.replace("oci://", "").split("/")[0],
+                    "-u", registry_username,
+                    "-p", registry_password
+                ]
+                login_result = subprocess.run(
+                    login_cmd, capture_output=True, text=True
+                )
+                if login_result.returncode != 0:
+                    raise RuntimeError(f"Helm registry login failed: {login_result.stderr.strip()}")
+
+            # 2. Push the chart
+            helm_command = [
+                "helm", "push", temp_chart.name, registry_url
+            ]
+            result = subprocess.run(
+                helm_command,
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Helm push failed: {result.stderr.strip()}")
+
+        return schemas.PostUploadHelmChartResponse(
+            success=True, detail="Helm chart uploaded successfully."
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"An unexpected error occurred: {e}"
+        )
+    finally:
+        await chart_file.close()
 
 
 # @app.post("/placeholder")
