@@ -108,31 +108,28 @@ async def upload_helm_chart(
             content = await chart_file.read()
             temp_chart.write(content)
             temp_chart.flush()
-
-            # 1. Login to the registry if credentials are provided
             if registry_username and registry_password:
                 login_cmd = [
-                    "helm", "registry", "login",
+                    "helm",
+                    "registry",
+                    "login",
                     registry_url.replace("oci://", "").split("/")[0],
-                    "-u", registry_username,
-                    "-p", registry_password
+                    "-u",
+                    registry_username,
+                    "-p",
+                    registry_password,
                 ]
-                login_result = subprocess.run(
-                    login_cmd, capture_output=True, text=True
-                )
+                login_result = subprocess.run(login_cmd, capture_output=True, text=True)
                 if login_result.returncode != 0:
-                    raise RuntimeError(f"Helm registry login failed: {login_result.stderr.strip()}")
-
-            # 2. Push the chart
-            helm_command = [
-                "helm", "push", temp_chart.name, registry_url
-            ]
+                    raise RuntimeError(
+                        f"Helm registry login failed: {login_result.stderr.strip()}"
+                    )
+            helm_command = ["helm", "push", temp_chart.name, registry_url]
             result = subprocess.run(
                 helm_command,
                 capture_output=True,
                 text=True,
             )
-
             if result.returncode != 0:
                 raise RuntimeError(f"Helm push failed: {result.stderr.strip()}")
 
@@ -149,8 +146,66 @@ async def upload_helm_chart(
         await chart_file.close()
 
 
-# @app.post("/placeholder")
-# def placeholder(
-#     artefact: schemas.PostPlaceholder
-# ) -> schemas.PostPlaceholderResponse:
-#     raise HTTPException(status_code=501, detail="Not implemented")
+@app.delete("/delete-helm-chart", tags=["Artefact Management"])
+async def delete_helm_chart(
+    chart: schemas.PostDeleteHelmChart,
+) -> schemas.PostDeleteHelmChartResponse:
+    """
+    API endpoint to delete a Helm chart from an OCI-compliant repository.
+    This uses Skopeo to delete the chart from the registry, which works with Harbor and other OCI registries.
+    """
+    try:
+        if chart.registry_username and chart.registry_password:
+            # Extract registry host from OCI URL
+            registry_host = chart.registry_url.replace("oci://", "").split("/")[0]
+
+            login_cmd = [
+                "helm",
+                "registry",
+                "login",
+                registry_host,
+                "-u",
+                chart.registry_username,
+                "-p",
+                chart.registry_password,
+            ]
+            login_result = subprocess.run(login_cmd, capture_output=True, text=True)
+            if login_result.returncode != 0:
+                raise RuntimeError(
+                    f"Helm registry login failed: {login_result.stderr.strip()}"
+                )
+        registry_base = chart.registry_url.replace('oci://', '').rstrip('/')
+        if '/' in chart.chart_name:
+            # chart_name already includes the project path, use it directly
+            chart_ref = f"{registry_base.split('/')[0]}/{chart.chart_name}:{chart.chart_version}"
+        else:
+            # chart_name doesn't include project, so add the full registry path
+            chart_ref = f"{registry_base}/{chart.chart_name}:{chart.chart_version}"        
+        delete_cmd = ["skopeo", "delete", f"docker://{chart_ref}"]
+        if chart.registry_username and chart.registry_password:
+            delete_cmd.extend(["--creds", f"{chart.registry_username}:{chart.registry_password}"])
+        result = subprocess.run(
+            delete_cmd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            error_message = result.stderr.strip()
+            if "unauthorized" in error_message.lower() or "invalid username/password" in error_message.lower():
+                raise RuntimeError(f"Authentication failed: {error_message}")
+            elif "not found" in error_message.lower():
+                raise RuntimeError(f"Helm chart {chart.chart_name}:{chart.chart_version} not found in registry")
+            else:
+                raise RuntimeError(f"Helm chart deletion failed: {error_message}")
+
+        return schemas.PostDeleteHelmChartResponse(
+            success=True,
+            detail=f"Helm chart {chart.chart_name}:{chart.chart_version} deleted successfully.",
+        )
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"An unexpected error occurred: {e}"
+        )
