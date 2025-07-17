@@ -90,6 +90,24 @@ class PostCopyArtefactResponse(BaseModel):
     success: bool
 
 
+class PostUploadHelmChart(BaseModel):
+    registry_url: str = Field(
+        ...,
+        description="OCI registry URL where the Helm chart will be uploaded",
+        json_schema_extra={"example": "oci://registry.example.com/project-name"},
+    )
+    registry_username: Optional[str] = Field(
+        default=None,
+        description="Optional username for OCI registry authentication",
+        json_schema_extra={"example": "admin"},
+    )
+    registry_password: Optional[str] = Field(
+        default=None,
+        description="Optional password for OCI registry authentication",
+        json_schema_extra={"example": "password"},
+    )
+
+
 class PostUploadHelmChartResponse(BaseModel):
     success: bool
     detail: str

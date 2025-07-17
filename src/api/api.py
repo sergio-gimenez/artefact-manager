@@ -2,11 +2,14 @@ import os
 import subprocess
 import tempfile
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from typing import Optional
 from fastapi.responses import RedirectResponse
 
 from src.skopeo.skopeo import SkopeoClient
+from src.helm.helm import helm_registry_login, extract_registry_host, build_chart_reference
 
 from . import schemas
+
 
 app = FastAPI(
     title="Artefact Manager API",
@@ -81,21 +84,23 @@ def copy_artefact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/upload-helm-chart", tags=["Artefact Management"])
+@app.post("/helm-chart", tags=["Artefact Management"])
 async def upload_helm_chart(
     chart_file: UploadFile = File(
         ..., description="The packaged Helm chart (.tgz file)."
     ),
-    registry_url: str = Form(..., description="URL of the OCI registry."),
-    registry_username: str | None = Form(
-        None, description="Username for the OCI registry."
-    ),
-    registry_password: str | None = Form(
-        None, description="Password for the OCI registry."
-    ),
+    registry_url: str = Form(..., description="Registry URL where the chart will be uploaded"),
+    registry_username: Optional[str] = Form(None, description="Registry username (optional)"),
+    registry_password: Optional[str] = Form(None, description="Registry password (optional)"),
 ) -> schemas.PostUploadHelmChartResponse:
     """
     API endpoint to upload a packaged Helm Chart to an OCI-compliant repository using Helm CLI.
+    
+    Parameters:
+    - chart_file: The .tgz file containing the Helm chart
+    - registry_url: Registry URL where the chart will be uploaded
+    - registry_username: Registry username (optional)
+    - registry_password: Registry password (optional)
     """
     if not chart_file.filename or not chart_file.filename.endswith(".tgz"):
         raise HTTPException(
@@ -108,22 +113,13 @@ async def upload_helm_chart(
             content = await chart_file.read()
             temp_chart.write(content)
             temp_chart.flush()
+
             if registry_username and registry_password:
-                login_cmd = [
-                    "helm",
-                    "registry",
-                    "login",
-                    registry_url.replace("oci://", "").split("/")[0],
-                    "-u",
-                    registry_username,
-                    "-p",
-                    registry_password,
-                ]
-                login_result = subprocess.run(login_cmd, capture_output=True, text=True)
-                if login_result.returncode != 0:
-                    raise RuntimeError(
-                        f"Helm registry login failed: {login_result.stderr.strip()}"
-                    )
+                registry_host = extract_registry_host(registry_url)
+                helm_registry_login(
+                    registry_host, registry_username, registry_password
+                )
+
             helm_command = ["helm", "push", temp_chart.name, registry_url]
             result = subprocess.run(
                 helm_command,
@@ -146,7 +142,7 @@ async def upload_helm_chart(
         await chart_file.close()
 
 
-@app.delete("/delete-helm-chart", tags=["Artefact Management"])
+@app.delete("/helm-chart", tags=["Artefact Management"])
 async def delete_helm_chart(
     chart: schemas.PostDeleteHelmChart,
 ) -> schemas.PostDeleteHelmChartResponse:
@@ -156,34 +152,21 @@ async def delete_helm_chart(
     """
     try:
         if chart.registry_username and chart.registry_password:
-            # Extract registry host from OCI URL
-            registry_host = chart.registry_url.replace("oci://", "").split("/")[0]
+            registry_host = extract_registry_host(chart.registry_url)
+            helm_registry_login(
+                registry_host, chart.registry_username, chart.registry_password
+            )
 
-            login_cmd = [
-                "helm",
-                "registry",
-                "login",
-                registry_host,
-                "-u",
-                chart.registry_username,
-                "-p",
-                chart.registry_password,
-            ]
-            login_result = subprocess.run(login_cmd, capture_output=True, text=True)
-            if login_result.returncode != 0:
-                raise RuntimeError(
-                    f"Helm registry login failed: {login_result.stderr.strip()}"
-                )
-        registry_base = chart.registry_url.replace('oci://', '').rstrip('/')
-        if '/' in chart.chart_name:
-            # chart_name already includes the project path, use it directly
-            chart_ref = f"{registry_base.split('/')[0]}/{chart.chart_name}:{chart.chart_version}"
-        else:
-            # chart_name doesn't include project, so add the full registry path
-            chart_ref = f"{registry_base}/{chart.chart_name}:{chart.chart_version}"        
+        chart_ref = build_chart_reference(
+            chart.registry_url, chart.chart_name, chart.chart_version
+        )
         delete_cmd = ["skopeo", "delete", f"docker://{chart_ref}"]
+
         if chart.registry_username and chart.registry_password:
-            delete_cmd.extend(["--creds", f"{chart.registry_username}:{chart.registry_password}"])
+            delete_cmd.extend(
+                ["--creds", f"{chart.registry_username}:{chart.registry_password}"]
+            )
+
         result = subprocess.run(
             delete_cmd,
             capture_output=True,
@@ -191,10 +174,15 @@ async def delete_helm_chart(
         )
         if result.returncode != 0:
             error_message = result.stderr.strip()
-            if "unauthorized" in error_message.lower() or "invalid username/password" in error_message.lower():
+            if (
+                "unauthorized" in error_message.lower()
+                or "invalid username/password" in error_message.lower()
+            ):
                 raise RuntimeError(f"Authentication failed: {error_message}")
             elif "not found" in error_message.lower():
-                raise RuntimeError(f"Helm chart {chart.chart_name}:{chart.chart_version} not found in registry")
+                raise RuntimeError(
+                    f"Helm chart {chart.chart_name}:{chart.chart_version} not found in registry"
+                )
             else:
                 raise RuntimeError(f"Helm chart deletion failed: {error_message}")
 
