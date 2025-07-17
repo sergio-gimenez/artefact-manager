@@ -166,14 +166,20 @@ async def delete_artefact(
     artefact: schemas.PostDeleteArtefact,
 ) -> schemas.PostDeleteArtefactResponse:
     """
-    <<<<<<< Updated upstream
-        API endpoint to delete a Helm chart from an OCI-compliant repository.
-        This uses Skopeo to delete the chart from the registry, which works with Harbor and other OCI registries.
-    =======
-        API endpoint to delete an artefact from an OCI-compliant repository.
-        This uses Skopeo to delete the artefact from the registry, beware that skopeo will
-        mark the artefact for later deletion by the registry's garbage collector
-    >>>>>>> Stashed changes
+    API endpoint to delete an artefact from an OCI-compliant repository.
+    This uses Skopeo to delete the artefact from the registry. Note that skopeo will
+    mark the artefact for later deletion by the registry's garbage collector.
+
+    ## ⚠️ Note on `DELETE /artefact` Support
+
+    The `DELETE` API uses `skopeo delete` which is not supported by all registries. For example:
+
+    - **Docker Hub**, **Amazon ECR**, and **Google GCR** block manifest deletion via the standard API.
+    - **Harbor**, **Artifactory (Pro)**, **Quay**, and **Azure ACR** support it, though some require specific configuration.
+
+    This limitation is due to platform policies and safety concerns.
+    Use the registry's official CLI or API (e.g., `gcloud`, `aws`, Docker Hub UI) if `skopeo delete` is not supported.
+    For full control over image lifecycle, consider using a self-hosted registry like **Harbor** or **Quay**.
     """
     try:
         if artefact.registry_username and artefact.registry_password:
