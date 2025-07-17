@@ -1,15 +1,18 @@
-import os
 import subprocess
 import tempfile
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from typing import Optional
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
 
+from src.helm.helm import (
+    build_chart_reference,
+    extract_registry_host,
+    helm_registry_login,
+)
 from src.skopeo.skopeo import SkopeoClient
-from src.helm.helm import helm_registry_login, extract_registry_host, build_chart_reference
 
 from . import schemas
-
 
 app = FastAPI(
     title="Artefact Manager API",
@@ -84,41 +87,57 @@ def copy_artefact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/helm-chart", tags=["Artefact Management"])
-async def upload_helm_chart(
-    chart_file: UploadFile = File(
-        ..., description="The packaged Helm chart (.tgz file)."
+@app.post("/artefact", tags=["Artefact Management"])
+async def upload_artefact(
+    artefact_file: UploadFile = File(
+        ..., description="The packaged artefact (.tgz file)."
     ),
-    registry_url: str = Form(..., description="Registry URL where the chart will be uploaded"),
-    registry_username: Optional[str] = Form(None, description="Registry username (optional)"),
-    registry_password: Optional[str] = Form(None, description="Registry password (optional)"),
-) -> schemas.PostUploadHelmChartResponse:
+    artefact_type: schemas.ArtefactType = Form(
+        ..., description="Type of artefact being uploaded"
+    ),
+    registry_url: str = Form(
+        ..., description="Registry URL where the artefact will be uploaded"
+    ),
+    registry_username: Optional[str] = Form(
+        None, description="Registry username (optional)"
+    ),
+    registry_password: Optional[str] = Form(
+        None, description="Registry password (optional)"
+    ),
+) -> schemas.PostUploadArtefactResponse:
     """
-    API endpoint to upload a packaged Helm Chart to an OCI-compliant repository using Helm CLI.
-    
+    API endpoint to upload a packaged artefact to an OCI-compliant repository.
+    Currently supports HELM charts using Helm CLI.
+
     Parameters:
-    - chart_file: The .tgz file containing the Helm chart
-    - registry_url: Registry URL where the chart will be uploaded
+    - artefact_file: The .tgz file containing the artefact
+    - artefact_type: Type of artefact (currently only HELM is supported)
+    - registry_url: Registry URL where the artefact will be uploaded
     - registry_username: Registry username (optional)
     - registry_password: Registry password (optional)
     """
-    if not chart_file.filename or not chart_file.filename.endswith(".tgz"):
+    if not artefact_file.filename or not artefact_file.filename.endswith(".tgz"):
         raise HTTPException(
             status_code=400,
-            detail="Invalid file type. Please upload a packaged Helm chart (.tgz).",
+            detail="Invalid file type. Please upload a packaged artefact (.tgz).",
+        )
+
+    # XXX Currently only HELM type is supported
+    if artefact_type != schemas.ArtefactType.HELM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Artefact type {artefact_type} is not currently supported. Only HELM is supported.",
         )
 
     try:
         with tempfile.NamedTemporaryFile(delete=True, suffix=".tgz") as temp_chart:
-            content = await chart_file.read()
+            content = await artefact_file.read()
             temp_chart.write(content)
             temp_chart.flush()
 
             if registry_username and registry_password:
                 registry_host = extract_registry_host(registry_url)
-                helm_registry_login(
-                    registry_host, registry_username, registry_password
-                )
+                helm_registry_login(registry_host, registry_username, registry_password)
 
             helm_command = ["helm", "push", temp_chart.name, registry_url]
             result = subprocess.run(
@@ -129,8 +148,8 @@ async def upload_helm_chart(
             if result.returncode != 0:
                 raise RuntimeError(f"Helm push failed: {result.stderr.strip()}")
 
-        return schemas.PostUploadHelmChartResponse(
-            success=True, detail="Helm chart uploaded successfully."
+        return schemas.PostUploadArtefactResponse(
+            success=True, detail="Artefact uploaded successfully."
         )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -139,32 +158,41 @@ async def upload_helm_chart(
             status_code=500, detail=f"An unexpected error occurred: {e}"
         )
     finally:
-        await chart_file.close()
+        await artefact_file.close()
 
 
-@app.delete("/helm-chart", tags=["Artefact Management"])
-async def delete_helm_chart(
-    chart: schemas.PostDeleteHelmChart,
-) -> schemas.PostDeleteHelmChartResponse:
+@app.delete("/artefact", tags=["Artefact Management"])
+async def delete_artefact(
+    artefact: schemas.PostDeleteArtefact,
+) -> schemas.PostDeleteArtefactResponse:
     """
-    API endpoint to delete a Helm chart from an OCI-compliant repository.
-    This uses Skopeo to delete the chart from the registry, which works with Harbor and other OCI registries.
+    <<<<<<< Updated upstream
+        API endpoint to delete a Helm chart from an OCI-compliant repository.
+        This uses Skopeo to delete the chart from the registry, which works with Harbor and other OCI registries.
+    =======
+        API endpoint to delete an artefact from an OCI-compliant repository.
+        This uses Skopeo to delete the artefact from the registry, beware that skopeo will
+        mark the artefact for later deletion by the registry's garbage collector
+    >>>>>>> Stashed changes
     """
     try:
-        if chart.registry_username and chart.registry_password:
-            registry_host = extract_registry_host(chart.registry_url)
+        if artefact.registry_username and artefact.registry_password:
+            registry_host = extract_registry_host(artefact.registry_url)
             helm_registry_login(
-                registry_host, chart.registry_username, chart.registry_password
+                registry_host, artefact.registry_username, artefact.registry_password
             )
 
-        chart_ref = build_chart_reference(
-            chart.registry_url, chart.chart_name, chart.chart_version
+        artefact_ref = build_chart_reference(
+            artefact.registry_url, artefact.artefact_name, artefact.artefact_version
         )
-        delete_cmd = ["skopeo", "delete", f"docker://{chart_ref}"]
+        delete_cmd = ["skopeo", "delete", f"docker://{artefact_ref}"]
 
-        if chart.registry_username and chart.registry_password:
+        if artefact.registry_username and artefact.registry_password:
             delete_cmd.extend(
-                ["--creds", f"{chart.registry_username}:{chart.registry_password}"]
+                [
+                    "--creds",
+                    f"{artefact.registry_username}:{artefact.registry_password}",
+                ]
             )
 
         result = subprocess.run(
@@ -181,14 +209,14 @@ async def delete_helm_chart(
                 raise RuntimeError(f"Authentication failed: {error_message}")
             elif "not found" in error_message.lower():
                 raise RuntimeError(
-                    f"Helm chart {chart.chart_name}:{chart.chart_version} not found in registry"
+                    f"Artefact {artefact.artefact_name}:{artefact.artefact_version} not found in registry"
                 )
             else:
-                raise RuntimeError(f"Helm chart deletion failed: {error_message}")
+                raise RuntimeError(f"Artefact deletion failed: {error_message}")
 
-        return schemas.PostDeleteHelmChartResponse(
+        return schemas.PostDeleteArtefactResponse(
             success=True,
-            detail=f"Helm chart {chart.chart_name}:{chart.chart_version} deleted successfully.",
+            detail=f"Artefact {artefact.artefact_name}:{artefact.artefact_version} deleted successfully.",
         )
 
     except RuntimeError as e:
