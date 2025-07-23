@@ -1,6 +1,15 @@
-from fastapi import FastAPI, HTTPException
+import subprocess
+import tempfile
+from typing import Optional
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
 
+from src.helm.helm import (
+    build_chart_reference,
+    extract_registry_host,
+    helm_registry_login,
+)
 from src.skopeo.skopeo import SkopeoClient
 
 from . import schemas
@@ -78,8 +87,147 @@ def copy_artefact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# @app.post("/placeholder")
-# def placeholder(
-#     artefact: schemas.PostPlaceholder
-# ) -> schemas.PostPlaceholderResponse:
-#     raise HTTPException(status_code=501, detail="Not implemented")
+@app.post("/artefact", tags=["Artefact Management"])
+async def upload_artefact(
+    artefact_file: UploadFile = File(
+        ..., description="The packaged artefact (.tgz file)."
+    ),
+    artefact_type: schemas.ArtefactType = Form(
+        ..., description="Type of artefact being uploaded"
+    ),
+    registry_url: str = Form(
+        ..., description="Registry URL where the artefact will be uploaded"
+    ),
+    registry_username: Optional[str] = Form(
+        None, description="Registry username (optional)"
+    ),
+    registry_password: Optional[str] = Form(
+        None, description="Registry password (optional)"
+    ),
+) -> schemas.PostUploadArtefactResponse:
+    """
+    API endpoint to upload a packaged artefact to an OCI-compliant repository.
+    Currently supports HELM charts using Helm CLI.
+
+    Parameters:
+    - artefact_file: The .tgz file containing the artefact
+    - artefact_type: Type of artefact (currently only HELM is supported)
+    - registry_url: Registry URL where the artefact will be uploaded
+    - registry_username: Registry username (optional)
+    - registry_password: Registry password (optional)
+    """
+    if not artefact_file.filename or not artefact_file.filename.endswith(".tgz"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid file type. Please upload a packaged artefact (.tgz).",
+        )
+
+    # XXX Currently only HELM type is supported
+    if artefact_type != schemas.ArtefactType.HELM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Artefact type {artefact_type} is not currently supported. Only HELM is supported.",
+        )
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".tgz") as temp_chart:
+            content = await artefact_file.read()
+            temp_chart.write(content)
+            temp_chart.flush()
+
+            if registry_username and registry_password:
+                registry_host = extract_registry_host(registry_url)
+                helm_registry_login(registry_host, registry_username, registry_password)
+
+            helm_command = ["helm", "push", temp_chart.name, registry_url]
+            result = subprocess.run(
+                helm_command,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Helm push failed: {result.stderr.strip()}")
+
+        return schemas.PostUploadArtefactResponse(
+            success=True, detail="Artefact uploaded successfully."
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"An unexpected error occurred: {e}"
+        )
+    finally:
+        await artefact_file.close()
+
+
+@app.delete("/artefact", tags=["Artefact Management"])
+async def delete_artefact(
+    artefact: schemas.PostDeleteArtefact,
+) -> schemas.PostDeleteArtefactResponse:
+    """
+    API endpoint to delete an artefact from an OCI-compliant repository.
+    This uses Skopeo to delete the artefact from the registry. Note that skopeo will
+    mark the artefact for later deletion by the registry's garbage collector.
+
+    ## ⚠️ Note on `DELETE /artefact` Support
+
+    The `DELETE` API uses `skopeo delete` which is not supported by all registries. For example:
+
+    - **Docker Hub**, **Amazon ECR**, and **Google GCR** block manifest deletion via the standard API.
+    - **Harbor**, **Artifactory (Pro)**, **Quay**, and **Azure ACR** support it, though some require specific configuration.
+
+    This limitation is due to platform policies and safety concerns.
+    Use the registry's official CLI or API (e.g., `gcloud`, `aws`, Docker Hub UI) if `skopeo delete` is not supported.
+    For full control over image lifecycle, consider using a self-hosted registry like **Harbor** or **Quay**.
+    """
+    try:
+        if artefact.registry_username and artefact.registry_password:
+            registry_host = extract_registry_host(artefact.registry_url)
+            helm_registry_login(
+                registry_host, artefact.registry_username, artefact.registry_password
+            )
+
+        artefact_ref = build_chart_reference(
+            artefact.registry_url, artefact.artefact_name, artefact.artefact_version
+        )
+        delete_cmd = ["skopeo", "delete", f"docker://{artefact_ref}"]
+
+        if artefact.registry_username and artefact.registry_password:
+            delete_cmd.extend(
+                [
+                    "--creds",
+                    f"{artefact.registry_username}:{artefact.registry_password}",
+                ]
+            )
+
+        result = subprocess.run(
+            delete_cmd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            error_message = result.stderr.strip()
+            if (
+                "unauthorized" in error_message.lower()
+                or "invalid username/password" in error_message.lower()
+            ):
+                raise RuntimeError(f"Authentication failed: {error_message}")
+            elif "not found" in error_message.lower():
+                raise RuntimeError(
+                    f"Artefact {artefact.artefact_name}:{artefact.artefact_version} not found in registry"
+                )
+            else:
+                raise RuntimeError(f"Artefact deletion failed: {error_message}")
+
+        return schemas.PostDeleteArtefactResponse(
+            success=True,
+            detail=f"Artefact {artefact.artefact_name}:{artefact.artefact_version} deleted successfully.",
+        )
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"An unexpected error occurred: {e}"
+        )

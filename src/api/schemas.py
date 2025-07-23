@@ -1,6 +1,11 @@
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+class ArtefactType(str, Enum):
+    HELM = "HELM"
 
 
 class PostArtefactExists(BaseModel):
@@ -88,3 +93,97 @@ class PostCopyArtefact(BaseModel):
 
 class PostCopyArtefactResponse(BaseModel):
     success: bool
+
+
+class PostUploadHelmChart(BaseModel):
+    registry_url: str = Field(
+        ...,
+        description="OCI registry URL where the Helm chart will be uploaded",
+        json_schema_extra={"example": "oci://registry.example.com/project-name"},
+    )
+    registry_username: Optional[str] = Field(
+        default=None,
+        description="Optional username for OCI registry authentication",
+        json_schema_extra={"example": "admin"},
+    )
+    registry_password: Optional[str] = Field(
+        default=None,
+        description="Optional password for OCI registry authentication",
+        json_schema_extra={"example": "password"},
+    )
+
+
+class PostUploadHelmChartResponse(BaseModel):
+    success: bool
+    detail: str
+
+
+class PostDeleteHelmChart(BaseModel):
+    registry_url: str = Field(
+        ...,
+        description="OCI registry URL where the Helm chart is stored",
+        json_schema_extra={"example": "oci://registry.example.com/project-name"},
+    )
+    chart_name: str = Field(
+        ...,
+        description="Name of the Helm chart to delete",
+        json_schema_extra={"example": "my-chart"},
+    )
+    chart_version: str = Field(
+        ...,
+        description="Version of the Helm chart to delete",
+        json_schema_extra={"example": "1.0.0"},
+    )
+    registry_username: Optional[str] = Field(
+        default=None,
+        description="Optional username for OCI registry authentication",
+        json_schema_extra={"example": "admin"},
+    )
+    registry_password: Optional[str] = Field(
+        default=None,
+        description="Optional password for OCI registry authentication",
+        json_schema_extra={"example": "password"},
+    )
+
+
+class PostDeleteHelmChartResponse(BaseModel):
+    success: bool
+    detail: str
+
+
+class PostUploadArtefactResponse(BaseModel):
+    success: bool
+    detail: str
+
+
+class PostDeleteArtefact(BaseModel):
+    registry_url: str = Field(
+        ...,
+        description="OCI registry URL where the artefact is stored",
+        json_schema_extra={"example": "oci://registry.example.com/project-name"},
+    )
+    artefact_name: str = Field(
+        ...,
+        description="Name of the artefact to delete",
+        json_schema_extra={"example": "my-chart"},
+    )
+    artefact_version: str = Field(
+        ...,
+        description="Version of the artefact to delete",
+        json_schema_extra={"example": "1.0.0"},
+    )
+    registry_username: Optional[str] = Field(
+        default=None,
+        description="Optional username for OCI registry authentication",
+        json_schema_extra={"example": "admin"},
+    )
+    registry_password: Optional[str] = Field(
+        default=None,
+        description="Optional password for OCI registry authentication",
+        json_schema_extra={"example": "password"},
+    )
+
+
+class PostDeleteArtefactResponse(BaseModel):
+    success: bool
+    detail: str
