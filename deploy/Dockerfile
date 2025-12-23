@@ -5,6 +5,8 @@ FROM python:3.10.12-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     skopeo \
+    curl \
+    && curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
     && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory
